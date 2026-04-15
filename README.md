@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/9fc21ba4-7a0b-4cd0-88d8-9fffc72db047
+
 # 🎓 EduLinker: 学术编辑部自动化联络 Agent
 
 > **一句话简介**：专为学术组织（如 ROE 编辑部）设计的全流程寻址与邀约工具，将“学者检索-画像分析-个性化约稿”从小时级压缩至秒级。
