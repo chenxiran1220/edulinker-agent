@@ -97,9 +97,28 @@ def load_from_custom_db(url):
 # ==========================================
 # 状态初始化
 # ==========================================
-if 'api_key' not in st.session_state: st.session_state.api_key = ""
-if 'db_url' not in st.session_state: st.session_state.db_url = ""
-if 'search_results' not in st.session_state: st.session_state.search_results = None
+def init_config():
+    # 1. 尝试从 Streamlit Secrets (内置机密) 读取
+    # 如果是本地 .streamlit/secrets.toml 或云端 Secrets 存在，则直接获取
+    built_in_key = st.secrets.get("SERPER_API_KEY", "")
+    built_in_url = st.secrets.get("DATABASE_URL", "")
+    built_in_name = st.secrets.get("DEFAULT_REAL_NAME", "演示账号")
+    built_in_dept = st.secrets.get("DEFAULT_DEPT_NAME", "Review Of Education")
+
+    # 2. 初始化 session_state
+    if 'api_key' not in st.session_state:
+        st.session_state.api_key = built_in_key
+    if 'db_url' not in st.session_state:
+        st.session_state.db_url = built_in_url
+    if 'real_name' not in st.session_state:
+        st.session_state.real_name = built_in_name
+    if 'dept_name' not in st.session_state:
+        st.session_state.dept_name = built_in_dept
+    
+    st.session_state.user_name = f"{st.session_state.real_name} - {st.session_state.dept_name}"
+
+# 在代码最上方调用
+init_config()
 
 # ==========================================
 # UI 布局
@@ -117,15 +136,23 @@ with col_title:
     st.markdown('<div class="simple-subtitle">Make academic exchange easier</div>', unsafe_allow_html=True)
 
 with col_set:
-    with st.popover("⚙️ 必填配置 (使用前需设置)"):
-        st.session_state.real_name = st.text_input("👤 姓名", value=st.session_state.get('real_name', ""))
-        st.session_state.dept_name = st.text_input("🏢 编辑部全称", value=st.session_state.get('dept_name', ""), placeholder="例如：Review Of Education")
-        st.session_state.user_name = f"{st.session_state.real_name} - {st.session_state.dept_name}"
+    # 检查是否已经成功加载内置配置
+    is_ready = st.session_state.api_key and st.session_state.db_url
+    
+    with st.popover("⚙️ 配置中心 (已预设)" if is_ready else "⚠️ 必填配置"):
+        st.session_state.real_name = st.text_input("👤 姓名", value=st.session_state.real_name)
+        st.session_state.dept_name = st.text_input("🏢 编辑部全称", value=st.session_state.dept_name)
         st.session_state.db_url = st.text_input("🔗 专属数据库 URL", value=st.session_state.db_url)
         st.session_state.api_key = st.text_input("🔑 Serper API KEY", value=st.session_state.api_key, type="password")
-        if st.button("💾 保存配置信息", use_container_width=True):
-            st.success("配置已锁定！")
+        
+        if st.button("💾 更新配置"):
+            st.success("配置已手动更新！")
 
+    # 🌟 评委一眼就能看到的绿灯提示
+    if is_ready:
+        st.markdown(f"✅ **系统已就绪** (欢迎您，{st.session_state.real_name})")
+    else:
+        st.error("❌ 配置缺失，请展开上方手动填写")
 tab1, tab2, tab3 = st.tabs(["📑 第一层：自动寻址", "📧 第二层：邮件撰写", "🏛️ 第三层：编辑部资产库"])
 
 
