@@ -9,6 +9,30 @@ import json
 # 设置网页信息
 st.set_page_config(page_title="EduLinker", page_icon="🎓", layout="wide")
 
+# ----------------- 核心逻辑：强制初始化所有状态变量 -----------------
+# 1. 初始化搜索结果（这是解决你 AttributeError 的关键）
+if 'search_results' not in st.session_state:
+    st.session_state.search_results = None
+
+# 2. 从 Secrets 或内置机密中读取配置
+if 'api_key' not in st.session_state:
+    st.session_state.api_key = st.secrets.get("SERPER_API_KEY", "")
+
+if 'db_url' not in st.session_state:
+    st.session_state.db_url = st.secrets.get("DATABASE_URL", "")
+
+# 3. 初始化用户信息
+if 'real_name' not in st.session_state:
+    st.session_state.real_name = st.secrets.get("DEFAULT_REAL_NAME", "演示账号")
+
+if 'dept_name' not in st.session_state:
+    st.session_state.dept_name = st.secrets.get("DEFAULT_DEPT_NAME", "Review Of Education")
+
+# 4. 合成用户完整显示名
+if 'user_name' not in st.session_state:
+    st.session_state.user_name = f"{st.session_state.real_name} - {st.session_state.dept_name}"
+# ------------------------------------------------------------------
+
 # ==========================================
 # 核心搜索代码 (评分制：解决多教师页面干扰)
 # ==========================================
@@ -94,31 +118,6 @@ def load_from_custom_db(url):
     except:
         return pd.DataFrame()
 
-# ==========================================
-# 状态初始化
-# ==========================================
-def init_config():
-    # 1. 尝试从 Streamlit Secrets (内置机密) 读取
-    # 如果是本地 .streamlit/secrets.toml 或云端 Secrets 存在，则直接获取
-    built_in_key = st.secrets.get("SERPER_API_KEY", "")
-    built_in_url = st.secrets.get("DATABASE_URL", "")
-    built_in_name = st.secrets.get("DEFAULT_REAL_NAME", "演示账号")
-    built_in_dept = st.secrets.get("DEFAULT_DEPT_NAME", "Review Of Education")
-
-    # 2. 初始化 session_state
-    if 'api_key' not in st.session_state:
-        st.session_state.api_key = built_in_key
-    if 'db_url' not in st.session_state:
-        st.session_state.db_url = built_in_url
-    if 'real_name' not in st.session_state:
-        st.session_state.real_name = built_in_name
-    if 'dept_name' not in st.session_state:
-        st.session_state.dept_name = built_in_dept
-    
-    st.session_state.user_name = f"{st.session_state.real_name} - {st.session_state.dept_name}"
-
-# 在代码最上方调用
-init_config()
 
 # ==========================================
 # UI 布局
@@ -299,11 +298,24 @@ with tab1:
                         st.info(f"🔗 **溯源核查**: [去 Google 查看]({source_url})")
 # ----------------- 第二层：邮件撰写 (逻辑完全咬合版) -----------------
 with tab2:
-    if st.session_state.search_results is None:
-        st.info("👈 请先在【第一层】上传名单并完成检索，此处将自动生成联络邮件。")
-    else:
+    # --- 展示并提供下载当前搜索结果 (安全增强版) ---
+    if st.session_state.get('search_results') is not None:
         df_results = st.session_state.search_results
-        success_df = df_results[df_results['提取邮箱'] != '未找到']
+        
+        # 🌟 这里的 if 确保了表格不是空的才进行筛选
+        if not df_results.empty:
+            # 只有表格里有数据，才执行这一行，彻底解决 TypeError
+            success_df = df_results[df_results['提取邮箱'] != '未找到']
+            
+            st.dataframe(df_results, use_container_width=True)
+            
+            # 展示一个小统计
+            st.success(f"🎊 本次检索完成！共发现 {len(success_df)} 个有效邮箱。")
+            
+            csv_data = df_results.to_csv(index=False).encode('utf-8-sig')
+            st.download_button("📥 下载本次搜索结果表格", data=csv_data, file_name="EduLinker_Result.csv", mime="text/csv")
+        else:
+            st.warning("⚠️ 暂无搜索结果，请上传文件或输入姓名开始检索。")
         
         if success_df.empty:
             st.warning("本次搜索未能提取到有效邮箱，无法生成邮件。")
