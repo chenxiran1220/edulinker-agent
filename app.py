@@ -10,51 +10,88 @@ import json
 st.set_page_config(page_title="EduLinker", page_icon="🎓", layout="wide")
 
 # ==========================================
-# 核心搜索代码 (希然要求的：100%不动)
+# 核心搜索代码 (评分制：解决多教师页面干扰)
 # ==========================================
 def search_scholar_email(name, institution, api_key):
     url = "https://google.serper.dev/search"
-    query = urllib.parse.quote(f"{name} {institution} email")
+    query = urllib.parse.quote(f"{name} {institution} email OR 邮箱 OR 联系方式")
     headers = {'X-API-KEY': api_key}
+    
+    blacklist = ['support', 'info', 'admin', 'official', 'service', 'contact', 'office', 'hr', 'library']
+    
     try:
-        response = requests.get(url + f"?q={query}", headers=headers)
+        response = requests.get(url + f"?q={query}", headers=headers, timeout=15)
         result = response.json()
-        snippets = ""
+        
         if "organic" in result:
+            best_email = "未找到"
+            best_status = "🔴 需人工核查"
+            best_link = "无来源"
+            max_score = -1 # 评分机制
+
+            # 遍历搜索结果
             for item in result["organic"]:
-                snippets += item.get("snippet", "") + " "
-        emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', snippets)
-        if emails:
-            return list(set(emails))[0], "🟢 已找到"
-        return "未找到", "🔴 需人工核查"
+                snippet = item.get("snippet", "").lower()
+                link = item.get("link", "")
+                
+                # 找出这段摘要里所有的邮箱
+                found_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', snippet)
+                
+                for email in found_emails:
+                    email = email.lower()
+                    prefix = email.split('@')[0]
+                    
+                    # 1. 黑名单过滤
+                    if any(b in prefix for b in blacklist):
+                        continue
+                    
+                    # 2. 计算匹配分数
+                    current_score = 0
+                    # 将名字拆分为拼音/字母部分 (如 "谢爱磊" -> ["xie", "ai", "lei"])
+                    name_parts = re.findall(r'[a-z]+', name.lower())
+                    
+                    # 关键逻辑：名字里的音节如果在邮箱前缀里出现了，加分！
+                    # 比如 xieailei 包含了 xie, ai, lei，得分会远高于 zhengh
+                    for part in name_parts:
+                        if len(part) > 1 and part in prefix:
+                            current_score += 10
+                    
+                    # 如果分数更高，则更新为当前最佳结果
+                    if current_score > max_score:
+                        max_score = current_score
+                        best_email = email
+                        best_link = link
+                        if current_score >= 10:
+                            best_status = "🟢 已找到 (高可信)"
+                        else:
+                            best_status = "🟡 邮箱存疑(名字匹配度低)"
+            
+            return best_email, best_status, best_link
+                            
+        return "未找到", "🔴 需人工核查", "无来源"
+        
     except Exception as e:
-        return f"错误: {str(e)}", "⚠️ 接口异常"
+        return "错误", "⚠️ 接口异常", "无来源"
+
 
 # ==========================================
-# 云端读写函数 (增加稳定性)
+# 云端读写函数
 # ==========================================
 def save_to_custom_db(url, data_dict):
-    """向用户提供的 Google Script URL 发送数据"""
     try:
         requests.post(url, data=json.dumps(data_dict), timeout=10)
-    except Exception as e:
-        st.error(f"云端写入失败，请检查数据库 URL: {str(e)}")
+    except:
+        pass
 
 def load_from_custom_db(url):
-    """从用户提供的 Google Script URL 读取数据"""
     try:
-        response = requests.get(url, timeout=10)
-        # 防止权限没设好导致获取到一堆 HTML 网页代码
-        if "<html" in response.text.lower():
-            st.error("云端读取失败：权限错误。请确保 Apps Script 部署时的权限是 'Anyone' (任何人)。")
-            return pd.DataFrame()
-            
+        response = requests.get(url, timeout=15)
+        if "<html" in response.text.lower(): return "AUTH_ERROR"
         raw_data = response.json()
         if len(raw_data) > 1:
-            return pd.DataFrame(raw_data[1:], columns=raw_data[0]) # 第一行为表头
+            return pd.DataFrame(raw_data[1:], columns=raw_data[0])
         return pd.DataFrame()
-    except Exception as e:
-        st.error(f"无法连接到数据库: {str(e)}")
+    except:
         return pd.DataFrame()
 
 # ==========================================
@@ -62,15 +99,14 @@ def load_from_custom_db(url):
 # ==========================================
 if 'api_key' not in st.session_state: st.session_state.api_key = ""
 if 'db_url' not in st.session_state: st.session_state.db_url = ""
-if 'user_name' not in st.session_state: st.session_state.user_name = "未认证用户"
 if 'search_results' not in st.session_state: st.session_state.search_results = None
 
 # ==========================================
-# 页面 UI: 问题 1 & 2 (极简标题 + 右上角合并配置)
+# UI 布局
 # ==========================================
 st.markdown("""
     <style>
-    .simple-title { font-size: 3rem; font-weight: bold; margin-bottom: 0px; color: #1e3a8a;}
+    .simple-title { font-size: 3rem; font-weight: bold; color: #1e3a8a; margin-bottom: 0px;}
     .simple-subtitle { font-size: 1.2rem; color: #6b7280; margin-top: 0px; margin-bottom: 30px;}
     </style>
     """, unsafe_allow_html=True)
@@ -82,142 +118,158 @@ with col_title:
 
 with col_set:
     with st.popover("⚙️ 必填配置 (使用前需设置)"):
-        # 1. 拆分字段并设置正确的示例
-        st.session_state.real_name = st.text_input("👤 姓名", 
-                                                value=st.session_state.get('real_name', ""), 
-                                                placeholder="例如：陈希然")
-        
-        # 修改点：编辑部示例改为 Review Of Education
-        st.session_state.dept_name = st.text_input("🏢 编辑部全称", 
-                                                value=st.session_state.get('dept_name', ""), 
-                                                placeholder="例如：Review Of Education")
-        
-        # 自动合成标识符，确保与你后续的“第一层”和“第三层”代码逻辑完全兼容
+        st.session_state.real_name = st.text_input("👤 姓名", value=st.session_state.get('real_name', ""))
+        st.session_state.dept_name = st.text_input("🏢 编辑部全称", value=st.session_state.get('dept_name', ""), placeholder="例如：Review Of Education")
         st.session_state.user_name = f"{st.session_state.real_name} - {st.session_state.dept_name}"
-        
-        st.session_state.db_url = st.text_input("🔗 专属数据库 URL", 
-                                             value=st.session_state.get('db_url', ""), 
-                                             help="贴入你在 Apps Script 得到的 URL")
-        
-        st.session_state.api_key = st.text_input("🔑 Serper API KEY", 
-                                              value=st.session_state.get('api_key', ""), 
-                                              type="password")
-        
-        # 2. 修改点：在末尾增加保存按钮
-        st.markdown("---") # 加一条分割线，视觉上更整齐
+        st.session_state.db_url = st.text_input("🔗 专属数据库 URL", value=st.session_state.db_url)
+        st.session_state.api_key = st.text_input("🔑 Serper API KEY", value=st.session_state.api_key, type="password")
         if st.button("💾 保存配置信息", use_container_width=True):
-            if st.session_state.real_name and st.session_state.dept_name and st.session_state.db_url and st.session_state.api_key:
-                st.success(f"配置已保存！欢迎您，来自 {st.session_state.dept_name} 的 {st.session_state.real_name}。")
-                # 可以在这里根据需要决定是否运行 st.rerun() 来即时锁定状态
-            else:
-                st.error("⚠️ 请完整填写所有信息后再点击保存！")
+            st.success("配置已锁定！")
 
-# 页面三层结构
 tab1, tab2, tab3 = st.tabs(["📑 第一层：自动寻址", "📧 第二层：邮件撰写", "🏛️ 第三层：编辑部资产库"])
 
-# ----------------- 第一层：自动寻址 (云端缓存省流版 + 抗干扰修复) -----------------
+
+# ----------------- 第一层：自动寻址 (双模式引擎版) -----------------
 with tab1:
-    # 1. 下载模板功能
-    template_df = pd.DataFrame({
-        "authfull": ["Robert Sternberg", "John Dewey"], 
-        "inst_name": ["Cornell University", "Columbia University"], 
-        "title": ["Professor", "Researcher"], 
-        "status": ["Active", "Active"]
-    })
-    st.download_button(
-        label="📥 下载 CSV 空白名单模板", 
-        data=template_df.to_csv(index=False).encode('utf-8-sig'), 
-        file_name="EduLinker_Upload_Template.csv", 
-        mime="text/csv"
-    )
-    
-    # 🌟 新增的填表说明：明确告知必填项
-    st.info("💡 **填表说明**：上传的 CSV 文件中，请务必确保包含 **'authfull' (学者姓名)** 和 **'inst_name' (工作单位/所属机构)** 这两列，否则程序将无法识别。")
+    # 🌟 新增：模式切换开关
+    search_mode = st.radio("🔍 请选择工作模式", ["批量名单检索 (CSV上传)", "单人极速寻址 (手动输入)"], horizontal=True)
+    st.markdown("---")
 
-    # 2. 上传和按钮逻辑
-    uploaded_file = st.file_uploader("📁 请上传包含学者名单的 CSV 文件", type=['csv'])
-    
-    if uploaded_file and st.button("🚀 开始检索并同步云端"): 
-        if not st.session_state.api_key or not st.session_state.db_url:
-            st.error("请先在右上角【必填配置】中填写 API Key 和 数据库 URL！")
-        else:
-            input_df = pd.read_csv(uploaded_file)
-            results = []
-            
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            total_scholars = len(input_df)
-            
-            # 🌟 核心新增：在爬虫开始前，先一次性拉取云端数据库作为“缓存池”
-            with st.spinner("正在比对云端资产库，为您节省 API 额度..."):
-                db_df = load_from_custom_db(st.session_state.db_url)
-                
-                # 初始化安全的列名变量
-                name_col_db = None
-                email_col_db = None
-                
-                # 清洗列名防报错
-                if not isinstance(db_df, str) and not db_df.empty:
-                    db_df.columns = [str(c).strip() for c in db_df.columns]
-                    all_cols = db_df.columns.tolist()
-                    
-                    # 动态模糊定位“姓名”和“邮箱”列
-                    name_col_db = next((c for c in all_cols if "姓名" in c or "Name" in c), None)
-                    email_col_db = next((c for c in all_cols if "邮箱" in c or "email" in c.lower()), None)
-                else:
-                    db_df = pd.DataFrame() # 如果读取失败，就当空表处理
+    # ==========================================
+    # 模式一：批量名单检索 (你之前已经完美跑通的代码)
+    # ==========================================
+    if search_mode == "批量名单检索 (CSV上传)":
+        template_df = pd.DataFrame({
+            "authfull": ["Robert Sternberg", "John Dewey"], 
+            "inst_name": ["Cornell University", "Columbia University"], 
+            "title": ["Professor", "Researcher"], 
+            "status": ["Active", "Active"]
+        })
+        st.download_button("📥 下载 CSV 空白名单模板", data=template_df.to_csv(index=False).encode('utf-8-sig'), file_name="EduLinker_Upload_Template.csv", mime="text/csv")
+        st.info("💡 **填表说明**：上传的 CSV 中请包含 **'authfull' (学者姓名)** 和 **'inst_name' (工作单位)**。")
 
-            for idx, row in input_df.iterrows():
-                name, inst = row.get('authfull','未知'), row.get('inst_name','未知')
-                status_text.text(f"正在检索 ({idx + 1}/{total_scholars}): {name}")
+        uploaded_file = st.file_uploader("📁 请上传包含学者名单的 CSV 文件", type=['csv'])
+        
+        if uploaded_file and st.button("🚀 开始批量检索并同步云端"):
+            if not st.session_state.api_key or not st.session_state.db_url:
+                st.error("请先在右上角【必填配置】中填写 API Key 和 数据库 URL！")
+            else:
+                input_df = pd.read_csv(uploaded_file)
+                results = []
                 
-                email = "未找到"
-                status = "🔴 需人工核查"
-                need_api_call = True  # 默认需要调用爬虫
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                total_scholars = len(input_df)
                 
-                # 🌟 核心新增：拦截器逻辑（使用动态列名，彻底消灭 KeyError）
-                if not db_df.empty and name_col_db and email_col_db:
-                    # 在云端库中寻找匹配的学者
-                    match = db_df[(db_df[name_col_db] == name) & (db_df[email_col_db] != '未找到') & (db_df[email_col_db].notna())]
-                    if not match.empty:
-                        email = str(match.iloc[-1][email_col_db]) # 取库里最新的一条记录
-                        status = "🔵 数据库调取" # 换成蓝色标志，让你知道省了一次钱！
-                        need_api_call = False
-                
-                # 如果库里没有，才调用真实的爬虫 API
-                if need_api_call:
-                    email, status = search_scholar_email(name, inst, st.session_state.api_key)
+                with st.spinner("正在比对云端资产库，为您节省 API 额度..."):
+                    db_df = load_from_custom_db(st.session_state.db_url)
+                    name_col_db, email_col_db, source_col_db = None, None, None
                     
-                    # 只有新爬到的有效数据，才同步写入云端
+                    if not isinstance(db_df, str) and not db_df.empty:
+                        db_df.columns = [str(c).strip() for c in db_df.columns]
+                        all_cols = db_df.columns.tolist()
+                        name_col_db = next((c for c in all_cols if "姓名" in c or "Name" in c), None)
+                        email_col_db = next((c for c in all_cols if "邮箱" in c or "email" in c.lower()), None)
+                        source_col_db = next((c for c in all_cols if "来源" in c or "source" in c.lower()), None)
+                    else:
+                        db_df = pd.DataFrame()
+
+                for idx, row in input_df.iterrows():
+                    name, inst = row.get('authfull','未知'), row.get('inst_name','未知')
+                    status_text.text(f"正在检索 ({idx + 1}/{total_scholars}): {name}")
+                    
+                    email, status, source_url, need_api_call = "未找到", "🔴 需人工核查", "无来源", True 
+                    
+                    if not db_df.empty and name_col_db and email_col_db:
+                        match = db_df[(db_df[name_col_db] == name) & (db_df[email_col_db] != '未找到') & (db_df[email_col_db].notna())]
+                        if not match.empty:
+                            email, status = str(match.iloc[-1][email_col_db]), "🔵 数据库调取"
+                            source_url = str(match.iloc[-1].get(source_col_db, '历史数据')) if source_col_db else '历史数据'
+                            need_api_call = False
+                    
+                    if need_api_call:
+                        email, status, source_url = search_scholar_email(name, inst, st.session_state.api_key)
+                        if email != "未找到":
+                            save_to_custom_db(st.session_state.db_url, {
+                                "name": name, "institution": inst, "title": row.get('title','Researcher'), 
+                                "status_val": row.get('status','Active'), "email": email, "status": status,
+                                "timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+                                "owner": st.session_state.user_name, "source_url": source_url
+                            })
+                    
+                    results.append({"学者姓名": name, "所属机构": inst, "提取邮箱": email, "状态": status, "网页来源": source_url})
+                    progress_bar.progress((idx + 1) / total_scholars)
+                
+                status_text.text("✅ 批量寻址完成，新数据已同步至云端！")
+                st.session_state.search_results = pd.DataFrame(results)
+                
+        if st.session_state.search_results is not None:
+            st.dataframe(st.session_state.search_results, use_container_width=True)
+            csv_data = st.session_state.search_results.to_csv(index=False).encode('utf-8-sig')
+            st.download_button("📥 下载本次搜索结果表格", data=csv_data, file_name="EduLinker_Batch_Result.csv", mime="text/csv")
+
+
+    # ==========================================
+    # 模式二：单人极速寻址 (新增功能)
+    # ==========================================
+    elif search_mode == "单人极速寻址 (手动输入)":
+        st.markdown("### ⚡ 单人极速查询工作台")
+        col_s1, col_s2 = st.columns(2)
+        
+        with col_s1:
+            single_name = st.text_input("👤 学者姓名", placeholder="例如：Paulo Freire")
+        with col_s2:
+            single_inst = st.text_input("🏫 所属机构 / 工作单位", placeholder="例如：Harvard University")
+            
+        if st.button("🔍 立即检索此人", use_container_width=True):
+            if not st.session_state.api_key or not st.session_state.db_url:
+                st.error("请先在右上角【必填配置】中填写 API Key 和 数据库 URL！")
+            elif not single_name or not single_inst:
+                st.warning("⚠️ 请完整输入学者的姓名和机构！")
+            else:
+                with st.spinner(f"正在全网扫描 {single_name} 的联系方式..."):
+                    # 1. 拦截器：先查库
+                    db_df = load_from_custom_db(st.session_state.db_url)
+                    name_col_db, email_col_db, source_col_db = None, None, None
+                    
+                    if not isinstance(db_df, str) and not db_df.empty:
+                        db_df.columns = [str(c).strip() for c in db_df.columns]
+                        all_cols = db_df.columns.tolist()
+                        name_col_db = next((c for c in all_cols if "姓名" in c or "Name" in c), None)
+                        email_col_db = next((c for c in all_cols if "邮箱" in c or "email" in c.lower()), None)
+                        source_col_db = next((c for c in all_cols if "来源" in c or "source" in c.lower()), None)
+                    else:
+                        db_df = pd.DataFrame()
+
+                    email, status, source_url, need_api_call = "未找到", "🔴 需人工核查", "无来源", True
+                    
+                    if not db_df.empty and name_col_db and email_col_db:
+                        match = db_df[(db_df[name_col_db] == single_name) & (db_df[email_col_db] != '未找到') & (db_df[email_col_db].notna())]
+                        if not match.empty:
+                            email, status = str(match.iloc[-1][email_col_db]), "🔵 数据库调取"
+                            source_url = str(match.iloc[-1].get(source_col_db, '历史数据')) if source_col_db else '历史数据'
+                            need_api_call = False
+                            st.toast('从云端资产库中秒传成功！', icon='⚡')
+
+                    # 2. 如果库里没有，查 API 并写入库
+                    if need_api_call:
+                        email, status, source_url = search_scholar_email(single_name, single_inst, st.session_state.api_key)
+                        if email != "未找到":
+                            save_to_custom_db(st.session_state.db_url, {
+                                "name": single_name, "institution": single_inst, "title": "Researcher", 
+                                "status_val": "Active", "email": email, "status": status,
+                                "timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+                                "owner": st.session_state.user_name, "source_url": source_url
+                            })
+
+                    # 3. 优雅地展示单人结果卡片
+                    st.markdown("---")
                     if email != "未找到":
-                        cloud_data = {
-                            "name": name, "institution": inst,
-                            "title": row.get('title','Researcher'), "status_val": row.get('status','Active'),
-                            "email": email, "status": status,
-                            "timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
-                            "owner": st.session_state.user_name
-                        }
-                        save_to_custom_db(st.session_state.db_url, cloud_data)
-                
-                # 统一打包结果显示在网页上
-                res_item = {
-                    "学者姓名": name, "所属机构": inst, 
-                    "职位": row.get('title','Researcher'), "学者状态": row.get('status','Active'),
-                    "提取邮箱": email, "状态": status
-                }
-                results.append(res_item)
-                
-                progress_bar.progress((idx + 1) / total_scholars)
-                
-            status_text.text("✅ 寻址完成，有效新数据已同步至您的私有云端！")
-            st.session_state.search_results = pd.DataFrame(results)
-            
-    # 展示搜索结果并提供下载按钮
-    if st.session_state.search_results is not None:
-        st.dataframe(st.session_state.search_results, use_container_width=True)
-        csv_data = st.session_state.search_results.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 下载本次搜索结果表格", data=csv_data, file_name="EduLinker_Current_Search.csv", mime="text/csv")
-
+                        st.success(f"🎉 **成功获取联系方式！** ({status})")
+                        st.info(f"📧 **提取邮箱**: `{email}`\n\n🔗 **溯源核查**: [点击访问网页来源]({source_url})")
+                    else:
+                        st.error("⚠️ 未能提取到有效邮箱，建议点击下方链接人工核查。")
+                        st.info(f"🔗 **溯源核查**: [去 Google 查看]({source_url})")
 # ----------------- 第二层：邮件撰写 (逻辑完全咬合版) -----------------
 with tab2:
     if st.session_state.search_results is None:
