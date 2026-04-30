@@ -6,6 +6,13 @@ import time
 import urllib.parse
 import json
 
+# --- 🌟 新增的拼音库引入逻辑，紧跟在原有的 import 后面 ---
+try:
+    from pypinyin import pinyin, Style
+    HAS_PINYIN = True
+except ImportError:
+    HAS_PINYIN = False
+
 # 设置网页信息
 st.set_page_config(page_title="EduLinker", page_icon="🎓", layout="wide")
 
@@ -33,70 +40,107 @@ if 'user_name' not in st.session_state:
     st.session_state.user_name = f"{st.session_state.real_name} - {st.session_state.dept_name}"
 # ------------------------------------------------------------------
 
+
 # ==========================================
-# 核心搜索代码 (评分制：解决多教师页面干扰)
+# 核心搜索代码 (V5 终极版：中英双轨制 + 靶向溯源 + 候选池打擂)
 # ==========================================
 def search_scholar_email(name, institution, api_key):
     url = "https://google.serper.dev/search"
-    query = urllib.parse.quote(f"{name} {institution} email OR 邮箱 OR 联系方式")
+    
+    is_chinese = bool(re.search(r'[\u4e00-\u9fa5]', name))
+    
+    # 🌟 改进 1：搜索词里直接“点名”QQ 和 163 邮箱，强制 Google 抓取它们
+    if is_chinese:
+        query_str = f"{name} {institution} (邮箱 OR email OR qq.com OR 163.com OR 师资队伍)"
+    else:
+        query_str = f'"{name}" {institution} (email OR "CV" OR profile)'
+        
+    query = urllib.parse.quote(query_str)
     headers = {'X-API-KEY': api_key}
     
-    blacklist = ['support', 'info', 'admin', 'official', 'service', 'contact', 'office', 'hr', 'library']
+    # 排除常见的机构邮箱词汇
+    blacklist = ['support', 'info', 'admin', 'service', 'contact', 'office', 'hr', 'library', 'dean', 
+                 'admission', 'ceit', 'department', 'school', 'public', 'official', 'enquiry', 'webmaster']
     
     try:
         response = requests.get(url + f"?q={query}", headers=headers, timeout=15)
         result = response.json()
         
         if "organic" in result:
-            best_email = "未找到"
-            best_status = "🔴 需人工核查"
-            best_link = "无来源"
-            max_score = -1 # 评分机制
+            email_candidates = {} 
+            
+            # 提取姓名拼音特征
+            name_parts = []
+            initials = ""
+            if is_chinese and HAS_PINYIN:
+                name_parts = [p[0].lower() for p in pinyin(name, style=Style.NORMAL)]
+                initials = "".join([p[0] for p in name_parts]) 
+            else:
+                name_parts = re.findall(r'[a-z]+', name.lower())
+                initials = "".join([p[0] for p in name_parts if p])
 
-            # 遍历搜索结果
-            for item in result["organic"]:
+            for item in result["organic"][:8]: # 扩大搜索范围到前 8 条结果
                 snippet = item.get("snippet", "").lower()
-                link = item.get("link", "")
-                
-                # 找出这段摘要里所有的邮箱
+                link = item.get("link", "").lower()
                 found_emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', snippet)
                 
                 for email in found_emails:
-                    email = email.lower()
-                    prefix = email.split('@')[0]
-                    
-                    # 1. 黑名单过滤
-                    if any(b in prefix for b in blacklist):
-                        continue
-                    
-                    # 2. 计算匹配分数
-                    current_score = 0
-                    # 将名字拆分为拼音/字母部分 (如 "谢爱磊" -> ["xie", "ai", "lei"])
-                    name_parts = re.findall(r'[a-z]+', name.lower())
-                    
-                    # 关键逻辑：名字里的音节如果在邮箱前缀里出现了，加分！
-                    # 比如 xieailei 包含了 xie, ai, lei，得分会远高于 zhengh
-                    for part in name_parts:
-                        if len(part) > 1 and part in prefix:
-                            current_score += 10
-                    
-                    # 如果分数更高，则更新为当前最佳结果
-                    if current_score > max_score:
-                        max_score = current_score
-                        best_email = email
-                        best_link = link
-                        if current_score >= 10:
-                            best_status = "🟢 已找到 (高可信)"
-                        else:
-                            best_status = "🟡 邮箱存疑(名字匹配度低)"
+                    if email not in email_candidates:
+                        email_candidates[email] = {"score": 0, "link": item.get("link", "")}
             
-            return best_email, best_status, best_link
-                            
+            if not email_candidates:
+                return "未找到", "🔴 未发现任何邮箱", "无来源"
+            
+            for email, data in email_candidates.items():
+                prefix = email.split('@')[0]
+                domain = email.split('@')[1]
+                link_lower = data["link"].lower()
+                score = 0
+                
+                # --- 评分逻辑开始 ---
+                
+                # 🌟 改进 2：姓名拼音权重（解决 zhangscnu 问题）
+                # 只要邮箱前缀包含姓氏全拼或首字母缩写
+                if any(part in prefix for part in name_parts if len(part) > 1):
+                    score += 60 
+                elif initials in prefix and len(initials) >= 2:
+                    score += 45
+                
+                # 🌟 改进 3：处理“全数字 QQ 邮箱”
+                # 如果是纯数字前缀且在师资页面，给一个基础信任分
+                if prefix.isdigit() and "qq.com" in domain:
+                    if any(kw in link_lower for kw in ['szdw', 'teacher', 'faculty', 'people']):
+                        score += 50 # 老师主页上的数字 QQ 邮箱通常是真实的
+                
+                # 域名分
+                if '.edu' in domain: score += 15
+                if is_chinese and ("163.com" in domain or "qq.com" in domain):
+                    score += 10
+                
+                # 来源加成：师资网/主页链接
+                if any(kw in link_lower for kw in ['szdw', 'teacher', 'faculty', 'people', 'profile']):
+                    score += 25
+                
+                # 黑名单严厉惩罚
+                if any(b in prefix for b in blacklist):
+                    score -= 150 
+                
+                email_candidates[email]["score"] = score
+            
+            # 决选
+            best_email = max(email_candidates, key=lambda x: email_candidates[x]["score"])
+            best_data = email_candidates[best_email]
+            
+            if best_data["score"] >= 40: # 降低一点门槛，确保数字 QQ 也能通过
+                return best_email, f"🟢 匹配成功 (得分: {best_data['score']})", best_data["link"]
+            elif best_data["score"] >= 10:
+                return best_email, "🟡 疑似个人邮箱", best_data["link"]
+            else:
+                return "未找到", "🔴 仅识别到公共/机构邮箱", "无来源"
+
         return "未找到", "🔴 需人工核查", "无来源"
-        
     except Exception as e:
         return "错误", "⚠️ 接口异常", "无来源"
-
 
 # ==========================================
 # 云端读写函数
