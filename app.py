@@ -38,12 +38,10 @@ if 'dept_name' not in st.session_state:
 # 4. 合成用户完整显示名
 if 'user_name' not in st.session_state:
     st.session_state.user_name = f"{st.session_state.real_name} - {st.session_state.dept_name}"
+
 # ------------------------------------------------------------------
-
-
-# ==========================================
-# 核心搜索代码 (V5 终极版：中英双轨制 + 靶向溯源 + 候选池打擂)
-# ==========================================
+#核心邮箱查询代码
+# ------------------------------------------------------------------
 def search_scholar_email(name, institution, api_key):
     url = "https://google.serper.dev/search"
     
@@ -162,6 +160,31 @@ def load_from_custom_db(url):
     except:
         return pd.DataFrame()
 
+# ==========================================
+# 重新补回：云端数据库读写函数
+# ==========================================
+def save_to_custom_db(url, data_dict):
+    """将搜索到的学者信息同步到 Google 表格或自定义数据库"""
+    try:
+        # 使用 json.dumps 确保数据格式正确
+        requests.post(url, data=json.dumps(data_dict), timeout=10)
+    except:
+        pass
+
+def load_from_custom_db(url):
+    """从云端资产库加载已有的学者数据"""
+    try:
+        response = requests.get(url, timeout=15)
+        # 防错机制：如果返回的是网页 HTML 而非 JSON，说明 URL 填错了或权限失效
+        if "<html" in response.text.lower(): return "AUTH_ERROR"
+        
+        raw_data = response.json()
+        if len(raw_data) > 1:
+            # 将第一行作为表头，其余作为内容转换为 DataFrame[cite: 1]
+            return pd.DataFrame(raw_data[1:], columns=raw_data[0])
+        return pd.DataFrame()
+    except:
+        return pd.DataFrame()
 
 # ==========================================
 # UI 布局
@@ -332,14 +355,60 @@ with tab1:
                                 "owner": st.session_state.user_name, "source_url": source_url
                             })
 
-                    # 3. 优雅地展示单人结果卡片
+                    # ==========================================
+                    # 3. 优雅地展示单人结果卡片并展开撰写平台 (你的核心需求)
+                    # ==========================================
                     st.markdown("---")
                     if email != "未找到":
+                        # 3.1 展示结果卡片
                         st.success(f"🎉 **成功获取联系方式！** ({status})")
                         st.info(f"📧 **提取邮箱**: `{email}`\n\n🔗 **溯源核查**: [点击访问网页来源]({source_url})")
+                        
+                        # 3.2 无缝衔接的“极速撰写平台”
+                        st.markdown("### ✍️ 专属邮件撰写台")
+                        
+                        # 智能提取姓氏用于预填 (处理 "Ball, Stephen" 或 "Stephen Ball")
+                        clean_n = single_name.replace(',', ' ')
+                        last_name_guess = single_name.split(',')[0].strip() if ',' in single_name else clean_n.split()[-1]
+                        
+                        # 提供学术邮件默认模板
+                        default_subject = f"Inquiry regarding your research at {single_inst}"
+                        default_body = (
+                            f"Dear Prof. {last_name_guess},\n\n"
+                            f"I hope this email finds you well. I have been following your excellent work at {single_inst}.\n\n"
+                            f"[此处填写您对教授研究的具体见解或提问]\n\n"
+                            f"Best regards,\n"
+                            f"Xiran Chen\n"
+                            f"Education Major, South China Normal University"
+                        )
+                        
+                        # 渲染输入框，允许用户在网页里修改
+                        email_subject = st.text_input("🏷️ 邮件主题", value=default_subject)
+                        email_body = st.text_area("📄 邮件正文", value=default_body, height=250)
+                        
+                        # 生成 HTML 一键发送按钮
+                        import urllib.parse
+                        safe_subject = urllib.parse.quote(email_subject)
+                        safe_body = urllib.parse.quote(email_body)
+                        mailto_link = f"mailto:{email}?subject={safe_subject}&body={safe_body}"
+                        
+                        st.markdown(
+                            f'''
+                            <a href="{mailto_link}" target="_blank">
+                                <button style="background-color:#4CAF50; color:white; padding:10px 24px; border:none; border-radius:6px; cursor:pointer; font-size: 16px; font-weight: bold; width: 100%;">
+                                    🚀 确认无误，一键唤起本地邮箱发送
+                                </button>
+                            </a>
+                            ''', 
+                            unsafe_allow_html=True
+                        )
                     else:
                         st.error("⚠️ 未能提取到有效邮箱，建议点击下方链接人工核查。")
-                        st.info(f"🔗 **溯源核查**: [去 Google 查看]({source_url})")
+                        
+                        # 这里修复一个小细节：如果没找到，自动生成一个去 Google 搜索的链接
+                        fallback_url = f"https://www.google.com/search?q={urllib.parse.quote(single_name + ' ' + single_inst + ' email')}"
+                        st.info(f"🔗 **溯源核查**: [去 Google 查看]({fallback_url})")
+
 # ----------------- 第二层：邮件撰写 (逻辑完全咬合版) -----------------
 with tab2:
     # --- 展示并提供下载当前搜索结果 (安全增强版) ---
